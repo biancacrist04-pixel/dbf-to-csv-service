@@ -1,42 +1,58 @@
-from flask import Flask, request, send_file, abort
-import dbf
-import csv
+import io
 import os
-import tempfile
+from flask import Flask, request, send_file, jsonify
+from dbfread import DBF
+import pandas as pd
 
 app = Flask(__name__)
 
-@app.route("/convert", methods=["POST"])
-def convert_dbf():
+def dbf_bytes_to_df(dbf_bytes: bytes) -> pd.DataFrame:
+    # dbfread precisa de arquivo (path) ou file-like.
+    # Vamos gravar em um arquivo temporário.
+    tmp_path = "/tmp/input.dbf"
+    with open(tmp_path, "wb") as f:
+        f.write(dbf_bytes)
+
+    # tenta cp1252 e cai para latin1
+    try:
+        tabela = DBF(tmp_path, load=True, encoding="cp1252", char_decode_errors="ignore")
+    except Exception:
+        tabela = DBF(tmp_path, load=True, encoding="latin1", char_decode_errors="ignore")
+
+    df = pd.DataFrame(iter(tabela))
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+@app.post("/convert")
+def convert():
     if "file" not in request.files:
-        return abort(400, "File not found in request")
+        return jsonify({"error": "Send multipart/form-data with field 'file'"}), 400
 
-    dbf_file = request.files["file"]
+    f = request.files["file"]
+    dbf_bytes = f.read()
 
-    with tempfile.TemporaryDirectory() as tmp:
-        dbf_path = os.path.join(tmp, dbf_file.filename)
-        csv_path = dbf_path.replace(".dbf", ".csv")
+    if not dbf_bytes:
+        return jsonify({"error": "Empty file"}), 400
 
-        dbf_file.save(dbf_path)
+    df = dbf_bytes_to_df(dbf_bytes)
 
-        table = dbf.Table(dbf_path)
-        table.open()
+    # gera CSV em memória
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_bytes = csv_buffer.getvalue().encode("utf-8-sig")
 
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(table.field_names)
-
-            for record in table:
-                writer.writerow(list(record))
-
-        table.close()
-
-        return send_file(
-            csv_path,
-            as_attachment=True,
-            download_name=os.path.basename(csv_path),
-            mimetype="text/csv"
-        )
+    # devolve como arquivo
+    return send_file(
+        io.BytesIO(csv_bytes),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="output.csv",
+    )
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
