@@ -6,26 +6,29 @@ import pandas as pd
 
 app = Flask(__name__)
 
-def dbf_bytes_to_df(dbf_bytes: bytes) -> pd.DataFrame:
-    # dbfread precisa de arquivo (path) ou file-like.
-    # Vamos gravar em um arquivo temporário.
-    tmp_path = "/tmp/input.dbf"
-    with open(tmp_path, "wb") as f:
-        f.write(dbf_bytes)
+def dbf_bytes_to_csv_bytes(dbf_bytes: bytes) -> bytes:
+    # DBFread precisa de "arquivo". Vamos usar um arquivo temporário em memória
+    # (dbfread aceita file-like? geralmente é caminho; então usamos temp file)
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".dbf", delete=True) as tmp:
+        tmp.write(dbf_bytes)
+        tmp.flush()
 
-    # tenta cp1252 e cai para latin1
-    try:
-        tabela = DBF(tmp_path, load=True, encoding="cp1252", char_decode_errors="ignore")
-    except Exception:
-        tabela = DBF(tmp_path, load=True, encoding="latin1", char_decode_errors="ignore")
+        try:
+            table = DBF(tmp.name, load=True, encoding="cp1252", char_decode_errors="ignore")
+        except Exception:
+            table = DBF(tmp.name, load=True, encoding="latin1", char_decode_errors="ignore")
 
-    df = pd.DataFrame(iter(tabela))
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
+        df = pd.DataFrame(iter(table))
+        df.columns = [str(c).strip() for c in df.columns]
+
+    out = io.StringIO()
+    df.to_csv(out, index=False)
+    return out.getvalue().encode("utf-8-sig")
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok"}
+    return {"ok": True}
 
 @app.post("/convert")
 def convert():
@@ -35,20 +38,12 @@ def convert():
     f = request.files["file"]
     dbf_bytes = f.read()
 
-    if not dbf_bytes:
-        return jsonify({"error": "Empty file"}), 400
+    csv_bytes = dbf_bytes_to_csv_bytes(dbf_bytes)
 
-    df = dbf_bytes_to_df(dbf_bytes)
-
-    # gera CSV em memória
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-    csv_bytes = csv_buffer.getvalue().encode("utf-8-sig")
-
-    # devolve como arquivo
+    # devolve como arquivo CSV
     return send_file(
         io.BytesIO(csv_bytes),
-        mimetype="text/csv",
+        mimetype="text/csv; charset=utf-8",
         as_attachment=True,
         download_name="output.csv",
     )
